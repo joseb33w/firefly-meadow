@@ -33,6 +33,11 @@
         inset: 0;
         width: 100vw;
         height: 100vh;
+        /* dvw/dvh follow the dynamic viewport so the canvas tracks the address bar
+           collapsing/expanding on mobile — critical for the pointer→canvas coord
+           helper to stay accurate without explicit JS-side style.width/height. */
+        width: 100dvw;
+        height: 100dvh;
         touch-action: none;
         cursor: crosshair;
       }
