@@ -33,9 +33,6 @@
         inset: 0;
         width: 100vw;
         height: 100vh;
-        /* dvw/dvh follow the dynamic viewport so the canvas tracks the address bar
-           collapsing/expanding on mobile — critical for the pointer→canvas coord
-           helper to stay accurate without explicit JS-side style.width/height. */
         width: 100dvw;
         height: 100dvh;
         touch-action: none;
@@ -143,15 +140,69 @@
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
+      .wish-bar {
+        position: fixed;
+        left: 50%;
+        bottom: max(14px, env(safe-area-inset-bottom, 0px) + 10px);
+        transform: translateX(-50%);
+        width: min(460px, calc(100vw - 28px));
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px 8px 16px;
+        background: rgba(8, 10, 22, 0.65);
+        border: 1px solid rgba(255, 200, 120, 0.15);
+        border-radius: 999px;
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        z-index: 12;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45), 0 0 30px rgba(255,170,80,0.05) inset;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      .wish-bar:focus-within {
+        border-color: rgba(255, 200, 120, 0.42);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.55), 0 0 24px rgba(255, 180, 90, 0.18);
+      }
+      .wish-bar input {
+        flex: 1 1 auto;
+        min-width: 0;
+        background: transparent;
+        border: 0;
+        outline: 0;
+        padding: 4px 0;
+        font: inherit;
+        font-size: 14px;
+        color: rgba(255, 240, 210, 0.95);
+        caret-color: #ffb86b;
+        letter-spacing: 0.01em;
+      }
+      .wish-bar input::placeholder {
+        color: rgba(255, 230, 180, 0.42);
+        font-weight: 400;
+      }
+      .wish-counter {
+        flex: 0 0 auto;
+        font-size: 11px;
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.04em;
+        color: rgba(255, 230, 180, 0.55);
+        padding-left: 8px;
+        border-left: 1px solid rgba(255, 200, 120, 0.12);
+        transition: color 0.2s ease;
+        min-width: 38px;
+        text-align: right;
+      }
+      .wish-counter[data-state="warn"]   { color: #ffb86b; }
+      .wish-counter[data-state="danger"] { color: #ff7676; }
       .credit {
         position: fixed;
-        bottom: max(10px, env(safe-area-inset-bottom, 0px) + 6px);
-        left: 50%;
-        transform: translateX(-50%);
-        font-size: 10px;
-        letter-spacing: 0.18em;
+        top: max(48px, env(safe-area-inset-top, 0px) + 42px);
+        right: max(14px, env(safe-area-inset-right, 0px) + 8px);
+        font-size: 9px;
+        letter-spacing: 0.22em;
         text-transform: uppercase;
-        color: rgba(255, 230, 180, 0.35);
+        color: rgba(255, 230, 180, 0.28);
         pointer-events: none;
         z-index: 5;
         font-weight: 500;
@@ -165,14 +216,29 @@
       <span id="hud-text">awakening…</span>
     </div>
     <button class="help-btn" id="help-btn" aria-label="What is this?" type="button">?</button>
+    <div class="credit">fireflymeadow</div>
     <div class="help-overlay" id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
       <div class="help-card">
         <strong id="help-title">Firefly Meadow</strong>
-        Tap anywhere to release a firefly. They live for 5 minutes and everyone sees them.
+        Tap anywhere to release a firefly. Whisper a wish first and your firefly carries it — tap a wished firefly to read it. They live for 5 minutes; wished ones for 10.
         <span>tap to dismiss</span>
       </div>
     </div>
-    <div class="credit">fireflymeadow</div>
+    <div class="wish-bar" id="wish-bar">
+      <input
+        id="wish-input"
+        type="text"
+        inputmode="text"
+        autocomplete="off"
+        autocapitalize="sentences"
+        spellcheck="true"
+        maxlength="80"
+        enterkeyhint="done"
+        placeholder="Whisper a wish (optional)…"
+        aria-label="Whisper a wish"
+      />
+      <span class="wish-counter" id="wish-counter" aria-live="off">0/80</span>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

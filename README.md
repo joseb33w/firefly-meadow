@@ -1,56 +1,60 @@
 # 🪲 FireflyMeadow
 
-A tiny, dark, calm shared meadow. Tap anywhere to release a firefly — everyone visiting the site sees everyone's fireflies, live. Each firefly drifts, glows, breathes, and gently fades out exactly 5 minutes after it was born.
+A tiny, dark, calm shared meadow. Tap anywhere to release a firefly — everyone visiting the site sees everyone's fireflies, live. Whisper a wish first and your firefly carries it; tap a wished firefly to read its wish. Silent fireflies live 5 minutes, wished ones 10.
 
 No login. No accounts. Just the meadow.
 
 ## Stack
 
 - **Vite + vanilla TypeScript** — no framework. ~60 KB gzipped, including the Supabase SDK.
-- **Canvas 2D** — additive-blended radial gradients for the bloom.
+- **Canvas 2D** — additive-blended radial gradients for the bloom, with a pulsing aura for wished fireflies.
 - **Supabase Postgres + Realtime** — one table, RLS-locked, INSERT-only for the public.
-- **Web Audio API** — soft cricket-and-wind ambient + hue-tuned chime on release.
+- **Web Audio API** — soft cricket-and-wind ambient + hue-tuned chime on release + a softer chime when other people's wishes arrive.
 
 ## How it feels
 
-- Tap (or click) anywhere to release a firefly.
-- It glows with a random warm hue (gold, amber, peach, pink-orange), drifts in a slow seeded random walk, breathes with a tiny pulse, and fades out over its last 30 seconds.
-- A tiny pill in the corner counts how many fireflies are currently glowing across all visitors.
-- The "?" icon shows a single line of help and dismisses on tap.
+- Tap (or click) anywhere on the meadow to release a firefly with a random warm hue (gold, amber, peach, pink-orange).
+- Type something into the wish input at the bottom first and the firefly carries that wish for 10 minutes instead of 5, with a soft pulsing aura around it. The input clears on release.
+- Tap a wished firefly (you'll feel the bigger silhouette) to see its wish for 4 seconds. Silent fireflies have no tooltip.
+- Tap, drag off, release → nothing happens. Prevents accidental double-actions.
+- A tiny pill in the top corner counts how many fireflies are currently glowing across all visitors. The "?" icon shows a single line of help.
 
 ## Backend schema
 
-One table: `usr_nmexs7bytxq2_fireflies`.
+One table: `usr_nmexs7bytxq2_fireflies`. Full migration in [`supabase/schema.sql`](./supabase/schema.sql).
 
 ```sql
 CREATE TABLE public.usr_nmexs7bytxq2_fireflies (
-  id      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  x       double precision NOT NULL,   -- 0.0..1.0 normalized
-  y       double precision NOT NULL,   -- 0.0..1.0 normalized
-  hue     integer NOT NULL,            -- 0..59 (warm range)
-  born_at timestamptz NOT NULL DEFAULT now()
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  x                double precision NOT NULL,        -- 0.0..1.0 normalized
+  y                double precision NOT NULL,        -- 0.0..1.0 normalized
+  hue              integer NOT NULL,                 -- 0..59 (warm range)
+  wish             text,                             -- CHECK length 0..80
+  lifespan_seconds integer NOT NULL DEFAULT 300,     -- CHECK in (300, 600)
+  born_at          timestamptz NOT NULL DEFAULT now()
 );
 
-ALTER TABLE public.usr_nmexs7bytxq2_fireflies ENABLE ROW LEVEL SECURITY;
-
--- anon can read rows from the last 5 minutes only
+-- anon can read while the per-row lifespan hasn't expired
 CREATE POLICY "anon_read_recent" ON public.usr_nmexs7bytxq2_fireflies
   FOR SELECT TO anon, authenticated
-  USING (born_at > now() - interval '5 minutes');
+  USING (born_at + (lifespan_seconds * interval '1 second') > now());
 
--- anon can insert, with x/y/hue bounds enforced
+-- anon can insert; lifespan must be one of (300, 600), wish ≤ 80 chars
 CREATE POLICY "anon_insert" ON public.usr_nmexs7bytxq2_fireflies
   FOR INSERT TO anon, authenticated
-  WITH CHECK (x BETWEEN 0 AND 1 AND y BETWEEN 0 AND 1 AND hue >= 0 AND hue < 360);
+  WITH CHECK (
+    x BETWEEN 0 AND 1 AND y BETWEEN 0 AND 1
+    AND hue >= 0 AND hue < 360
+    AND lifespan_seconds IN (300, 600)
+    AND (wish IS NULL OR char_length(wish) <= 80)
+  );
 
 GRANT SELECT, INSERT ON public.usr_nmexs7bytxq2_fireflies TO anon, authenticated;
 ALTER TABLE public.usr_nmexs7bytxq2_fireflies REPLICA IDENTITY FULL;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.usr_nmexs7bytxq2_fireflies;
 ```
 
-The full migration is in [`supabase/schema.sql`](./supabase/schema.sql).
-
-No `UPDATE`, no `DELETE` grants — rows naturally drop off the read window after 5 minutes.
+No `UPDATE`, no `DELETE` grants — rows naturally drop off the read window when `born_at + lifespan_seconds` passes.
 
 ## Local development
 
@@ -59,6 +63,8 @@ cp .env.example .env       # then fill in your values
 npm install
 npm run dev                # http://localhost:5173
 ```
+
+A debug bridge (`window.__ffm`) is exposed only when building with `VITE_DEBUG=1`; the production build is clean.
 
 ## Deploying
 
@@ -82,11 +88,11 @@ The live URL will be `https://<your-user>.github.io/firefly-meadow/`.
 
 ```
 .
-├── index.html              # mount point, HUD markup, all styles
+├── index.html              # mount point, HUD, wish bar, all styles
 ├── src/
-│   ├── main.ts             # rendering loop, firefly physics, Supabase wiring
-│   ├── supabase.ts         # client + table name from env
-│   └── audio.ts            # ambient pad + hue-tuned chime
+│   ├── main.ts             # rendering loop, firefly physics, gesture, Supabase wiring
+│   ├── supabase.ts         # client + types + lifespan constants
+│   └── audio.ts            # ambient pad + release chime + softer wish-arrival chime
 ├── supabase/schema.sql     # full migration with RLS + Realtime
 ├── .github/workflows/deploy.yml
 └── vite.config.ts

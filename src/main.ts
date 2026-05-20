@@ -1,11 +1,13 @@
-import { supabase, hasSupabase, TABLE, type FireflyRow } from './supabase';
-import { startAmbient, playChime } from './audio';
+import { supabase, hasSupabase, TABLE, SILENT_LIFESPAN_S, WISH_LIFESPAN_S, WISH_MAX_LEN, type FireflyRow } from './supabase';
+import { startAmbient, playChime, playWishChime } from './audio';
 
-const LIFE_MS = 5 * 60 * 1000;
 const FADE_IN_MS = 2000;
 const FADE_OUT_MS = 30 * 1000;
 const STAR_COUNT = 140;
 const MAX_OPTIMISTIC_TRACKED = 200;
+const HIT_RADIUS_PX = 20;
+const TOOLTIP_MS = 4000;
+const TAP_DRIFT_TOLERANCE_PX = 14;
 
 type Firefly = {
   id: string;
@@ -13,11 +15,20 @@ type Firefly = {
   bx: number;
   by: number;
   hue: number;
+  wish: string | null;
+  lifespanMs: number;
   ax1: number; ax2: number; px1: number; px2: number; fx1: number; fx2: number;
   ay1: number; ay2: number; py1: number; py2: number; fy1: number; fy2: number;
   pulsePhase: number;
   pulseFreq: number;
+  haloPhase: number;
   optimistic: boolean;
+};
+
+type Tooltip = {
+  fireflyId: string;
+  startedAt: number;
+  lines: string[];
 };
 
 const canvas = document.getElementById('meadow') as HTMLCanvasElement;
@@ -27,11 +38,9 @@ const ctx: CanvasRenderingContext2D = _ctx;
 const hudText = document.getElementById('hud-text') as HTMLSpanElement;
 const helpBtn = document.getElementById('help-btn') as HTMLButtonElement;
 const helpOverlay = document.getElementById('help-overlay') as HTMLDivElement;
+const wishInput = document.getElementById('wish-input') as HTMLInputElement;
+const wishCounter = document.getElementById('wish-counter') as HTMLSpanElement;
 
-// All app-side coordinates are in CSS pixels; cssW/cssH track the canvas's CURRENT
-// CSS-pixel size (read from getBoundingClientRect — never from window.innerWidth,
-// which can lag the actual layout on mobile when the address bar collapses or the
-// soft keyboard appears).
 let dpr = 1;
 let cssW = 1;
 let cssH = 1;
@@ -54,13 +63,7 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', applyCanvasSize);
 }
 
-// Single helper for converting a pointer event's clientX/Y into BOTH CSS-pixel
-// coords (cssX, cssY — what the renderer uses) and normalized 0..1 coords
-// (normX, normY — what gets persisted to Supabase). Anywhere we need pointer→canvas
-// math, we go through here, never recompute the rect math inline.
-function pointFromEvent(e: { clientX: number; clientY: number }): {
-  cssX: number; cssY: number; normX: number; normY: number;
-} {
+function pointFromEvent(e: { clientX: number; clientY: number }): { cssX: number; cssY: number; normX: number; normY: number } {
   const rect = canvas.getBoundingClientRect();
   const cssX = e.clientX - rect.left;
   const cssY = e.clientY - rect.top;
@@ -102,23 +105,39 @@ const stars: Star[] = (() => {
 })();
 
 const fireflies = new Map<string, Firefly>();
+let tooltip: Tooltip | null = null;
+const knownAtSubscribe = new Set<string>();
 
-function buildFirefly(id: string, bornAt: number, bx: number, by: number, hue: number, optimistic = false): Firefly {
-  const r = makeRng(hashStringToSeed(id));
+function buildFirefly(row: { id: string; bornAt: number; bx: number; by: number; hue: number; wish: string | null; lifespanMs: number; optimistic: boolean }): Firefly {
+  const r = makeRng(hashStringToSeed(row.id));
   return {
-    id, bornAt, bx, by, hue,
-    ax1: 60 + r() * 60, ax2: 16 + r() * 22,
-    px1: r() * Math.PI * 2, px2: r() * Math.PI * 2,
-    fx1: 0.04 + r() * 0.05, fx2: 0.22 + r() * 0.20,
-    ay1: 60 + r() * 60, ay2: 16 + r() * 22,
-    py1: r() * Math.PI * 2, py2: r() * Math.PI * 2,
-    fy1: 0.04 + r() * 0.05, fy2: 0.22 + r() * 0.20,
-    pulsePhase: r() * Math.PI * 2, pulseFreq: 0.22 + r() * 0.18,
-    optimistic
+    id: row.id,
+    bornAt: row.bornAt,
+    bx: row.bx,
+    by: row.by,
+    hue: row.hue,
+    wish: row.wish,
+    lifespanMs: row.lifespanMs,
+    ax1: 60 + r() * 60,
+    ax2: 16 + r() * 22,
+    px1: r() * Math.PI * 2,
+    px2: r() * Math.PI * 2,
+    fx1: 0.04 + r() * 0.05,
+    fx2: 0.22 + r() * 0.20,
+    ay1: 60 + r() * 60,
+    ay2: 16 + r() * 22,
+    py1: r() * Math.PI * 2,
+    py2: r() * Math.PI * 2,
+    fy1: 0.04 + r() * 0.05,
+    fy2: 0.22 + r() * 0.20,
+    pulsePhase: r() * Math.PI * 2,
+    pulseFreq: 0.22 + r() * 0.18,
+    haloPhase: r() * Math.PI * 2,
+    optimistic: row.optimistic
   };
 }
 
-function addRow(row: FireflyRow, optimistic = false): void {
+function addRow(row: FireflyRow, optimistic = false, fromRealtime = false): void {
   const existing = fireflies.get(row.id);
   if (existing) {
     if (existing.optimistic && !optimistic) existing.optimistic = false;
@@ -126,19 +145,34 @@ function addRow(row: FireflyRow, optimistic = false): void {
   }
   const bornAt = optimistic ? Date.now() : Date.parse(row.born_at);
   if (Number.isNaN(bornAt)) return;
-  if (Date.now() - bornAt >= LIFE_MS) return;
-  fireflies.set(row.id, buildFirefly(row.id, bornAt, row.x, row.y, row.hue, optimistic));
+  const lifespanMs = (row.lifespan_seconds ?? SILENT_LIFESPAN_S) * 1000;
+  if (Date.now() - bornAt >= lifespanMs) return;
+  const wish = (row.wish && row.wish.trim().length > 0) ? row.wish : null;
+  fireflies.set(row.id, buildFirefly({
+    id: row.id, bornAt, bx: row.x, by: row.y, hue: row.hue, wish, lifespanMs, optimistic
+  }));
   scheduleHud();
+  if (fromRealtime && wish && !knownAtSubscribe.has(row.id)) {
+    playWishChime(row.hue);
+  }
 }
 
 let hudDirty = true;
 function scheduleHud(): void { hudDirty = true; }
+
 let prevHudText = '';
 function renderHud(): void {
   if (!hudDirty) return;
   const n = fireflies.size;
-  const txt = n === 0 ? 'tap to begin' : n === 1 ? '1 firefly glowing' : `${n} fireflies glowing`;
-  if (txt !== prevHudText) { hudText.textContent = txt; prevHudText = txt; }
+  const txt = n === 0
+    ? 'tap to begin'
+    : n === 1
+      ? '1 firefly glowing'
+      : `${n} fireflies glowing`;
+  if (txt !== prevHudText) {
+    hudText.textContent = txt;
+    prevHudText = txt;
+  }
   hudDirty = false;
 }
 
@@ -156,7 +190,9 @@ function drawBackground(): void {
   ctx.beginPath();
   ctx.moveTo(0, horizonY);
   ctx.bezierCurveTo(cssW * 0.3, horizonY - 18, cssW * 0.65, horizonY + 22, cssW, horizonY - 6);
-  ctx.lineTo(cssW, cssH); ctx.lineTo(0, cssH); ctx.closePath();
+  ctx.lineTo(cssW, cssH);
+  ctx.lineTo(0, cssH);
+  ctx.closePath();
   ctx.fill();
   ctx.globalAlpha = 1;
 }
@@ -174,23 +210,32 @@ function drawStars(t: number): void {
   ctx.restore();
 }
 
-function drawFirefly(f: Firefly, nowMs: number): void {
+function fireflyDriftedPos(f: Firefly, nowMs: number): { x: number; y: number } {
+  const tSec = (nowMs - f.bornAt) / 1000;
+  const dx = f.ax1 * Math.sin(f.fx1 * tSec + f.px1) + f.ax2 * Math.sin(f.fx2 * tSec + f.px2);
+  const dy = f.ay1 * Math.sin(f.fy1 * tSec + f.py1) + f.ay2 * Math.sin(f.fy2 * tSec + f.py2);
+  return { x: f.bx * cssW + dx, y: f.by * cssH + dy };
+}
+
+function fireflyEnvelope(f: Firefly, nowMs: number): number {
   const age = nowMs - f.bornAt;
-  if (age < 0 || age >= LIFE_MS) return;
+  if (age < 0 || age >= f.lifespanMs) return 0;
   let envelope = 1;
   if (age < FADE_IN_MS) envelope = Math.sin((age / FADE_IN_MS) * (Math.PI * 0.5));
-  const fadeOutStart = LIFE_MS - FADE_OUT_MS;
+  const fadeOutStart = f.lifespanMs - FADE_OUT_MS;
   if (age > fadeOutStart) {
     const t = (age - fadeOutStart) / FADE_OUT_MS;
     envelope = Math.min(envelope, Math.cos(t * (Math.PI * 0.5)));
   }
+  return Math.max(0, envelope);
+}
+
+function drawFirefly(f: Firefly, nowMs: number): void {
+  const envelope = fireflyEnvelope(f, nowMs);
   if (envelope <= 0.001) return;
 
-  const tSec = age / 1000;
-  const dx = f.ax1 * Math.sin(f.fx1 * tSec + f.px1) + f.ax2 * Math.sin(f.fx2 * tSec + f.px2);
-  const dy = f.ay1 * Math.sin(f.fy1 * tSec + f.py1) + f.ay2 * Math.sin(f.fy2 * tSec + f.py2);
-  const x = f.bx * cssW + dx;
-  const y = f.by * cssH + dy;
+  const tSec = (nowMs - f.bornAt) / 1000;
+  const { x, y } = fireflyDriftedPos(f, nowMs);
 
   const pulse = 0.78 + 0.22 * Math.sin(tSec * f.pulseFreq * Math.PI * 2 + f.pulsePhase);
   const intensity = envelope * pulse;
@@ -198,20 +243,138 @@ function drawFirefly(f: Firefly, nowMs: number): void {
   const haloR = 28 + 12 * pulse;
   const hue = f.hue;
 
+  if (f.wish) {
+    const auraPulse = 0.55 + 0.45 * Math.sin(tSec * Math.PI * 2 + f.haloPhase);
+    const auraR = 56 + 14 * auraPulse;
+    const auraAlpha = 0.12 * envelope * (0.4 + 0.6 * auraPulse);
+    const aura = ctx.createRadialGradient(x, y, haloR * 0.6, x, y, auraR);
+    aura.addColorStop(0, `hsla(${hue}, 55%, 70%, ${auraAlpha})`);
+    aura.addColorStop(0.6, `hsla(${hue}, 50%, 55%, ${auraAlpha * 0.45})`);
+    aura.addColorStop(1, `hsla(${hue}, 45%, 45%, 0)`);
+    ctx.fillStyle = aura;
+    ctx.beginPath();
+    ctx.arc(x, y, auraR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   const halo = ctx.createRadialGradient(x, y, 0, x, y, haloR);
   halo.addColorStop(0,    `hsla(${hue}, 95%, 78%, ${0.55 * intensity})`);
   halo.addColorStop(0.25, `hsla(${hue}, 92%, 65%, ${0.30 * intensity})`);
   halo.addColorStop(0.55, `hsla(${hue}, 88%, 55%, ${0.13 * intensity})`);
   halo.addColorStop(1,    `hsla(${hue}, 80%, 45%, 0)`);
   ctx.fillStyle = halo;
-  ctx.beginPath(); ctx.arc(x, y, haloR, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x, y, haloR, 0, Math.PI * 2);
+  ctx.fill();
 
   const core = ctx.createRadialGradient(x, y, 0, x, y, coreR * 4);
   core.addColorStop(0,    `hsla(50, 100%, 96%, ${0.95 * intensity})`);
   core.addColorStop(0.35, `hsla(${hue}, 100%, 80%, ${0.65 * intensity})`);
   core.addColorStop(1,    `hsla(${hue}, 90%, 60%, 0)`);
   ctx.fillStyle = core;
-  ctx.beginPath(); ctx.arc(x, y, coreR * 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x, y, coreR * 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function wrapWish(text: string, maxWidth: number): string[] {
+  ctx.font = '500 13px -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif';
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = '';
+  for (const w of words) {
+    const tentative = current ? `${current} ${w}` : w;
+    if (ctx.measureText(tentative).width > maxWidth && current) {
+      lines.push(current);
+      current = w;
+    } else {
+      current = tentative;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [text];
+}
+
+function drawTooltip(now: number): void {
+  if (!tooltip) return;
+  const f = fireflies.get(tooltip.fireflyId);
+  if (!f || !f.wish) { tooltip = null; return; }
+  const elapsed = now - tooltip.startedAt;
+  if (elapsed >= TOOLTIP_MS) { tooltip = null; return; }
+
+  let alpha = 1;
+  if (elapsed < 350) alpha = elapsed / 350;
+  else if (elapsed > TOOLTIP_MS - 500) alpha = Math.max(0, (TOOLTIP_MS - elapsed) / 500);
+  if (alpha <= 0.005) return;
+
+  const { x, y } = fireflyDriftedPos(f, Date.now());
+  const maxWidth = Math.min(280, cssW - 40);
+  ctx.font = '500 13px -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif';
+  const lineHeight = 17;
+  const padX = 12;
+  const padY = 9;
+
+  const widest = tooltip.lines.reduce((mx, l) => Math.max(mx, ctx.measureText(l).width), 0);
+  const rectW = Math.min(maxWidth + padX * 2, widest + padX * 2);
+  const rectH = tooltip.lines.length * lineHeight + padY * 2;
+
+  const aboveY = y - 24 - rectH;
+  const belowY = y + 24;
+  let rectY = aboveY;
+  let flipped = false;
+  if (aboveY < 8) {
+    rectY = belowY;
+    flipped = true;
+  }
+
+  let rectX = x - rectW / 2;
+  rectX = Math.max(8, Math.min(cssW - rectW - 8, rectX));
+
+  const tipCx = Math.max(rectX + 14, Math.min(rectX + rectW - 14, x));
+  const r = 12;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(10, 12, 24, 0.92)';
+  ctx.strokeStyle = `hsla(${f.hue}, 80%, 65%, 0.55)`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(rectX + r, rectY);
+  ctx.lineTo(rectX + rectW - r, rectY);
+  ctx.quadraticCurveTo(rectX + rectW, rectY, rectX + rectW, rectY + r);
+  ctx.lineTo(rectX + rectW, rectY + rectH - r);
+  ctx.quadraticCurveTo(rectX + rectW, rectY + rectH, rectX + rectW - r, rectY + rectH);
+  ctx.lineTo(rectX + r, rectY + rectH);
+  ctx.quadraticCurveTo(rectX, rectY + rectH, rectX, rectY + rectH - r);
+  ctx.lineTo(rectX, rectY + r);
+  ctx.quadraticCurveTo(rectX, rectY, rectX + r, rectY);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(10, 12, 24, 0.92)';
+  ctx.strokeStyle = `hsla(${f.hue}, 80%, 65%, 0.55)`;
+  ctx.beginPath();
+  if (!flipped) {
+    ctx.moveTo(tipCx - 6, rectY + rectH);
+    ctx.lineTo(tipCx, rectY + rectH + 7);
+    ctx.lineTo(tipCx + 6, rectY + rectH);
+  } else {
+    ctx.moveTo(tipCx - 6, rectY);
+    ctx.lineTo(tipCx, rectY - 7);
+    ctx.lineTo(tipCx + 6, rectY);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.lineWidth = 0;
+
+  ctx.fillStyle = `hsla(${f.hue}, 90%, 86%, ${0.96 * alpha})`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  for (let i = 0; i < tooltip.lines.length; i++) {
+    ctx.fillText(tooltip.lines[i], rectX + padX, rectY + padY + i * lineHeight, maxWidth);
+  }
+  ctx.restore();
 }
 
 function loop(now: number): void {
@@ -220,22 +383,31 @@ function loop(now: number): void {
 
   let removed = false;
   for (const [id, f] of fireflies) {
-    if (nowMs - f.bornAt >= LIFE_MS) { fireflies.delete(id); removed = true; }
+    if (nowMs - f.bornAt >= f.lifespanMs) {
+      fireflies.delete(id);
+      removed = true;
+      if (tooltip && tooltip.fireflyId === id) tooltip = null;
+    }
   }
   if (removed) scheduleHud();
 
   drawBackground();
   drawStars(now);
+
   ctx.globalCompositeOperation = 'lighter';
   for (const f of fireflies.values()) drawFirefly(f, nowMs);
   ctx.globalCompositeOperation = 'source-over';
+
+  drawTooltip(now);
 
   renderHud();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-function randomWarmHue(): number { return Math.floor(15 + Math.random() * 45); }
+function randomWarmHue(): number {
+  return Math.floor(15 + Math.random() * 45);
+}
 
 function genLocalId(): string {
   const c = window.crypto;
@@ -250,19 +422,31 @@ function genLocalId(): string {
 
 const recentOptimistic = new Set<string>();
 
-async function releaseFirefly(normX: number, normY: number): Promise<void> {
+async function releaseFirefly(normX: number, normY: number, wishText: string | null): Promise<void> {
   const hue = randomWarmHue();
   const id = genLocalId();
+  const lifespanSec = wishText ? WISH_LIFESPAN_S : SILENT_LIFESPAN_S;
   recentOptimistic.add(id);
   if (recentOptimistic.size > MAX_OPTIMISTIC_TRACKED) {
     const it = recentOptimistic.values().next();
     if (!it.done) recentOptimistic.delete(it.value);
   }
-  const row: FireflyRow = { id, x: normX, y: normY, hue, born_at: new Date().toISOString() };
-  addRow(row, true);
+
+  addRow({
+    id,
+    x: normX,
+    y: normY,
+    hue,
+    wish: wishText,
+    lifespan_seconds: lifespanSec,
+    born_at: new Date().toISOString()
+  }, true);
   playChime(hue);
+
   if (!supabase) return;
-  const { error } = await supabase.from(TABLE).insert({ id, x: normX, y: normY, hue });
+  const payload: Record<string, unknown> = { id, x: normX, y: normY, hue, lifespan_seconds: lifespanSec };
+  if (wishText) payload.wish = wishText;
+  const { error } = await supabase.from(TABLE).insert(payload);
   if (error) {
     fireflies.delete(id);
     scheduleHud();
@@ -270,16 +454,105 @@ async function releaseFirefly(normX: number, normY: number): Promise<void> {
   }
 }
 
-let pointerActive = false;
-canvas.addEventListener('pointerdown', (e) => {
-  pointerActive = true;
-  startAmbient();
-  const { normX, normY } = pointFromEvent(e);
-  void releaseFirefly(normX, normY);
+function hitTestFirefly(cssX: number, cssY: number, nowMs: number): Firefly | null {
+  let best: { f: Firefly; d2: number } | null = null;
+  const r2 = HIT_RADIUS_PX * HIT_RADIUS_PX;
+  for (const f of fireflies.values()) {
+    if (fireflyEnvelope(f, nowMs) <= 0.05) continue;
+    const { x, y } = fireflyDriftedPos(f, nowMs);
+    const dx = cssX - x;
+    const dy = cssY - y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 <= r2 && (!best || d2 < best.d2)) best = { f, d2 };
+  }
+  return best ? best.f : null;
+}
+
+function showTooltip(f: Firefly): void {
+  if (!f.wish) return;
+  const lines = wrapWish(f.wish, Math.min(260, cssW - 64));
+  tooltip = { fireflyId: f.id, startedAt: performance.now(), lines };
+}
+
+function currentWishText(): string | null {
+  const v = wishInput.value.trim();
+  if (v.length === 0) return null;
+  return v.slice(0, WISH_MAX_LEN);
+}
+
+function clearWishInput(): void {
+  wishInput.value = '';
+  updateWishCounter();
+}
+
+function updateWishCounter(): void {
+  const len = wishInput.value.length;
+  wishCounter.textContent = `${len}/${WISH_MAX_LEN}`;
+  let state = 'ok';
+  if (len >= WISH_MAX_LEN) state = 'danger';
+  else if (len > 60) state = 'warn';
+  wishCounter.dataset.state = state;
+}
+wishInput.addEventListener('input', updateWishCounter);
+wishInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    wishInput.blur();
+  }
 });
-canvas.addEventListener('pointerup', () => { pointerActive = false; });
-canvas.addEventListener('pointercancel', () => { pointerActive = false; });
-canvas.addEventListener('contextmenu', (e) => { if (pointerActive) e.preventDefault(); });
+updateWishCounter();
+
+type DownState = {
+  pointerId: number;
+  cssX: number;
+  cssY: number;
+  normX: number;
+  normY: number;
+  startTarget: Firefly | null;
+};
+let down: DownState | null = null;
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (down) return;
+  startAmbient();
+  const p = pointFromEvent(e);
+  const hit = hitTestFirefly(p.cssX, p.cssY, Date.now());
+  down = { pointerId: e.pointerId, cssX: p.cssX, cssY: p.cssY, normX: p.normX, normY: p.normY, startTarget: hit };
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+});
+
+canvas.addEventListener('pointerup', (e) => {
+  if (!down || e.pointerId !== down.pointerId) return;
+  try { canvas.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+  const p = pointFromEvent(e);
+  const start = down;
+  down = null;
+
+  const nowMs = Date.now();
+  if (start.startTarget) {
+    const stillHit = hitTestFirefly(p.cssX, p.cssY, nowMs);
+    if (stillHit && stillHit.id === start.startTarget.id) {
+      showTooltip(stillHit);
+    }
+    return;
+  }
+  const dx = p.cssX - start.cssX;
+  const dy = p.cssY - start.cssY;
+  const movedFar = (dx * dx + dy * dy) > (TAP_DRIFT_TOLERANCE_PX * TAP_DRIFT_TOLERANCE_PX);
+  const releaseX = movedFar ? p.normX : start.normX;
+  const releaseY = movedFar ? p.normY : start.normY;
+  const wishText = currentWishText();
+  void releaseFirefly(releaseX, releaseY, wishText);
+  if (wishText) clearWishInput();
+});
+
+canvas.addEventListener('pointercancel', (e) => {
+  if (down && e.pointerId === down.pointerId) {
+    try { canvas.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    down = null;
+  }
+});
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function showHelp(): void { helpOverlay.classList.add('show'); }
 function hideHelp(): void { helpOverlay.classList.remove('show'); }
@@ -288,33 +561,56 @@ helpOverlay.addEventListener('pointerdown', (e) => { e.stopPropagation(); hideHe
 
 async function seedFromDb(): Promise<void> {
   if (!supabase) return;
-  const sinceIso = new Date(Date.now() - LIFE_MS).toISOString();
+  const sinceIso = new Date(Date.now() - WISH_LIFESPAN_S * 1000).toISOString();
   const { data, error } = await supabase
     .from(TABLE)
-    .select('id,x,y,hue,born_at')
+    .select('id,x,y,hue,wish,lifespan_seconds,born_at')
     .gt('born_at', sinceIso)
     .order('born_at', { ascending: true })
     .limit(500);
-  if (error) { console.warn('[fireflymeadow] seed query failed:', error.message); return; }
-  for (const row of (data ?? []) as FireflyRow[]) addRow(row, false);
+  if (error) {
+    console.warn('[fireflymeadow] seed query failed:', error.message);
+    return;
+  }
+  for (const row of (data ?? []) as FireflyRow[]) {
+    knownAtSubscribe.add(row.id);
+    addRow(row, false, false);
+  }
 }
 
 function subscribeRealtime(): void {
   if (!supabase) return;
   const channel = supabase
     .channel('fireflies-stream')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: TABLE }, (payload) => {
-      const row = payload.new as FireflyRow;
-      if (recentOptimistic.has(row.id)) {
-        const existing = fireflies.get(row.id);
-        if (existing) existing.optimistic = false;
-        return;
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: TABLE },
+      (payload) => {
+        const row = payload.new as FireflyRow;
+        if (recentOptimistic.has(row.id)) {
+          const existing = fireflies.get(row.id);
+          if (existing) existing.optimistic = false;
+          return;
+        }
+        addRow(row, false, true);
       }
-      addRow(row, false);
-    })
+    )
     .subscribe();
   const client = supabase;
   window.addEventListener('beforeunload', () => { void client.removeChannel(channel); });
+}
+
+if (import.meta.env.VITE_DEBUG === '1') {
+  (window as unknown as { __ffm: unknown }).__ffm = {
+    fireflies: () => Array.from(fireflies.values()).map((f) => {
+      const p = fireflyDriftedPos(f, Date.now());
+      return { id: f.id, bx: f.bx, by: f.by, hue: f.hue, wish: f.wish, lifespanMs: f.lifespanMs, x: p.x, y: p.y };
+    }),
+    tooltip: () => tooltip
+      ? { fireflyId: tooltip.fireflyId, startedAt: tooltip.startedAt, lines: tooltip.lines, elapsedMs: performance.now() - tooltip.startedAt }
+      : null,
+    cssSize: () => ({ cssW, cssH, dpr })
+  };
 }
 
 if (!hasSupabase) {

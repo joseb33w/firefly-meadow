@@ -105,6 +105,33 @@ export function playChime(hue: number): void {
   });
 }
 
+export function playWishChime(hue: number): void {
+  const c = ensureCtx();
+  if (!c || !masterGain) return;
+  resumeIfNeeded();
+  const t = c.currentTime;
+  const clamped = Math.max(0, Math.min(60, hue));
+  const t01 = clamped / 60;
+  const baseFreq = 660 - t01 * 220;
+
+  const tones = [baseFreq, baseFreq * 1.5, baseFreq * 2.25];
+  const gains = [0.10, 0.06, 0.035];
+
+  tones.forEach((freq, i) => {
+    const osc = c.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const g = c.createGain();
+    g.gain.value = 0;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(gains[i], t + 0.12);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 2.6);
+    osc.connect(g).connect(masterGain!);
+    osc.start(t);
+    osc.stop(t + 2.7);
+  });
+}
+
 export function muteAudio(): void {
   mutedByUser = true;
   if (masterGain) masterGain.gain.setTargetAtTime(0, ctx!.currentTime, 0.4);
