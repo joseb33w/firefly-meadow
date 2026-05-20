@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1" />
+    <meta name="theme-color" content="#06070f" />
+    <meta name="description" content="A quiet, shared meadow. Tap to release a firefly — everyone sees everyone's fireflies in real time." />
+    <title>FireflyMeadow</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><radialGradient id='g' cx='50%25' cy='50%25' r='50%25'><stop offset='0%25' stop-color='%23fff7c2'/><stop offset='50%25' stop-color='%23ffb86b' stop-opacity='0.8'/><stop offset='100%25' stop-color='%23ff7a3a' stop-opacity='0'/></radialGradient></defs><rect width='32' height='32' fill='%23070815'/><circle cx='16' cy='16' r='14' fill='url(%23g)'/></svg>" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+        background: #06070f;
+        color: #efe7d2;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -webkit-tap-highlight-color: transparent;
+        overscroll-behavior: none;
+      }
+      body {
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #meadow {
+        display: block;
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        width: 100dvw;
+        height: 100dvh;
+        touch-action: none;
+        cursor: crosshair;
+      }
+      .hud {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top, 0px) + 8px);
+        left: max(14px, env(safe-area-inset-left, 0px) + 8px);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: rgba(8, 10, 22, 0.55);
+        border: 1px solid rgba(255, 200, 120, 0.12);
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0.02em;
+        color: rgba(255, 230, 180, 0.85);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        pointer-events: none;
+        z-index: 10;
+        font-variant-numeric: tabular-nums;
+      }
+      .hud-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: radial-gradient(circle at 30% 30%, #fff5c8, #ff9c4a 60%, transparent 100%);
+        box-shadow: 0 0 8px rgba(255, 180, 90, 0.6);
+        animation: pulse 2.4s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 0.55; transform: scale(1); }
+        50%      { opacity: 1; transform: scale(1.15); }
+      }
+      .help-btn {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top, 0px) + 8px);
+        right: max(14px, env(safe-area-inset-right, 0px) + 8px);
+        width: 32px;
+        height: 32px;
+        border-radius: 999px;
+        background: rgba(8, 10, 22, 0.55);
+        border: 1px solid rgba(255, 200, 120, 0.18);
+        color: rgba(255, 230, 180, 0.85);
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1;
+        display: grid;
+        place-items: center;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        cursor: pointer;
+        z-index: 11;
+        padding: 0;
+        transition: transform 0.18s ease, background 0.18s ease;
+      }
+      .help-btn:hover { transform: scale(1.06); background: rgba(20, 18, 32, 0.7); }
+      .help-btn:active { transform: scale(0.96); }
+      .help-overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(2, 3, 8, 0.55);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        z-index: 20;
+        opacity: 0;
+        transition: opacity 0.24s ease;
+      }
+      .help-overlay.show { display: flex; opacity: 1; }
+      .help-card {
+        max-width: 340px;
+        padding: 22px 24px;
+        text-align: center;
+        background: linear-gradient(180deg, rgba(20, 16, 32, 0.85), rgba(10, 8, 20, 0.85));
+        border: 1px solid rgba(255, 200, 120, 0.18);
+        border-radius: 18px;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 40px rgba(255, 170, 80, 0.06) inset;
+        color: rgba(255, 235, 200, 0.92);
+        font-size: 14px;
+        line-height: 1.55;
+        letter-spacing: 0.01em;
+      }
+      .help-card strong {
+        display: block;
+        font-size: 13px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #ffb86b;
+        margin-bottom: 10px;
+        font-weight: 600;
+      }
+      .help-card span {
+        display: block;
+        margin-top: 14px;
+        font-size: 11px;
+        opacity: 0.6;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .wish-bar {
+        position: fixed;
+        left: 50%;
+        bottom: max(14px, env(safe-area-inset-bottom, 0px) + 10px);
+        transform: translateX(-50%);
+        width: min(460px, calc(100vw - 28px));
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px 8px 16px;
+        background: rgba(8, 10, 22, 0.65);
+        border: 1px solid rgba(255, 200, 120, 0.15);
+        border-radius: 999px;
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        z-index: 12;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45), 0 0 30px rgba(255,170,80,0.05) inset;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      .wish-bar:focus-within {
+        border-color: rgba(255, 200, 120, 0.42);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.55), 0 0 24px rgba(255, 180, 90, 0.18);
+      }
+      .wish-bar input {
+        flex: 1 1 auto;
+        min-width: 0;
+        background: transparent;
+        border: 0;
+        outline: 0;
+        padding: 4px 0;
+        font: inherit;
+        font-size: 14px;
+        color: rgba(255, 240, 210, 0.95);
+        caret-color: #ffb86b;
+        letter-spacing: 0.01em;
+      }
+      .wish-bar input::placeholder {
+        color: rgba(255, 230, 180, 0.42);
+        font-weight: 400;
+      }
+      .wish-counter {
+        flex: 0 0 auto;
+        font-size: 11px;
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.04em;
+        color: rgba(255, 230, 180, 0.55);
+        padding-left: 8px;
+        border-left: 1px solid rgba(255, 200, 120, 0.12);
+        transition: color 0.2s ease;
+        min-width: 38px;
+        text-align: right;
+      }
+      .wish-counter[data-state="warn"]   { color: #ffb86b; }
+      .wish-counter[data-state="danger"] { color: #ff7676; }
+      .credit {
+        position: fixed;
+        top: max(48px, env(safe-area-inset-top, 0px) + 42px);
+        right: max(14px, env(safe-area-inset-right, 0px) + 8px);
+        font-size: 9px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: rgba(255, 230, 180, 0.28);
+        pointer-events: none;
+        z-index: 5;
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="meadow"></canvas>
+    <div class="hud" id="hud">
+      <span class="hud-dot" aria-hidden="true"></span>
+      <span id="hud-text">awakening…</span>
+    </div>
+    <button class="help-btn" id="help-btn" aria-label="What is this?" type="button">?</button>
+    <div class="credit">fireflymeadow</div>
+    <div class="help-overlay" id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
+      <div class="help-card">
+        <strong id="help-title">Firefly Meadow</strong>
+        Tap anywhere to release a firefly. Whisper a wish first and your firefly carries it — tap a wished firefly to read it. They live for 5 minutes; wished ones for 10.
+        <span>tap to dismiss</span>
+      </div>
+    </div>
+    <div class="wish-bar" id="wish-bar">
+      <input
+        id="wish-input"
+        type="text"
+        inputmode="text"
+        autocomplete="off"
+        autocapitalize="sentences"
+        spellcheck="true"
+        maxlength="80"
+        enterkeyhint="done"
+        placeholder="Whisper a wish (optional)…"
+        aria-label="Whisper a wish"
+      />
+      <span class="wish-counter" id="wish-counter" aria-live="off">0/80</span>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
